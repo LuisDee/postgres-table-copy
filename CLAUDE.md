@@ -1,9 +1,32 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 Project conventions for any Claude / agent session in this repo. Read
 `docs/design.md` first — that's the architectural contract. This file is the
 working rules. `docs/research-notes.md` is the sourced research the design
 rests on; cite it when a decision needs justifying.
+
+## Commands
+
+```bash
+python -m venv .venv && . .venv/bin/activate    # one-time
+pip install -e ".[dev]"                          # editable install + dev deps
+
+pytest -q                          # unit tests (mock psycopg), fast; default
+                                   # deselects integration via addopts
+pytest tests/unit/test_registry.py -q            # one file
+pytest -k "register and duplicate" -q            # one test by name
+pytest -m integration -q           # real Postgres (testcontainers postgres:16
+                                   # or $PGCOPY_TEST_DSN); skips cleanly if absent
+ruff check src/ tests/             # lint — zero warnings expected
+ruff check --fix src/ tests/       # autofix
+
+pgcopy --help                      # the CLI entry point (console script)
+```
+
+No build step beyond the wheel (`python -m build`); this is a pure-Python
+package with a `pgcopy` console script (`pyproject.toml [project.scripts]`).
 
 ## What this project is
 
@@ -81,21 +104,20 @@ independent row-count + hash/sample **verification** (`docs/design.md` §3.10).
 `pg_dump`/`pg_restore`/pgcopydb are **client binaries** — shipping them on our
 side is allowed; the "no install" rule is about the database *hosts*.
 
-## Testing
+## Testing & TDD (mandatory)
 
-```
-pytest -q                  # unit tests, mock psycopg, fast (<1s target)
-pytest -m integration      # tests/integration/, real Postgres via
-                           # testcontainers (postgres:16) or $PGCOPY_TEST_DSN;
-                           # skips cleanly otherwise with a clear reason
-ruff check src/ tests/     # zero warnings expected
-```
+TDD is mandatory here: write a failing test, then the code, then green. No
+behaviour change without a test first. Commands are under "Commands" above.
 
-Prefer tests that assert on the **SQL string constructed** rather than on the
-side effects of running it. Real-DB behaviour (snapshot consistency across
-workers, CTID boundary correctness, FK `VALIDATE` lock levels) is the
-integration suite's job — write it early; it's the parent project's
-self-identified biggest gap.
+- Prefer tests that assert on the **SQL string constructed** rather than on the
+  side effects of running it — real-DB behaviour is the integration suite's job.
+- Mock `psycopg` at the connection/cursor boundary. Shared fakes and fixtures
+  live in `tests/conftest.py` (`FakeConnection`/`FakeCursor`, `fake_conn`,
+  `tmp_registry`, …) — use them rather than rebuilding ad-hoc mocks per test.
+  This mirrors the parent project's `tests/_helpers.py` discipline.
+- Unit tests live in `tests/unit/`, integration in `tests/integration/`
+  (gated behind `-m integration`). Write the integration suite early — it's the
+  parent project's self-identified biggest gap.
 
 ## Commits
 
