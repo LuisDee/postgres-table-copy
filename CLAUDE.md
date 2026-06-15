@@ -28,6 +28,47 @@ pgcopy --help                      # the CLI entry point (console script)
 No build step beyond the wheel (`python -m build`); this is a pure-Python
 package with a `pgcopy` console script (`pyproject.toml [project.scripts]`).
 
+## Delivery methodology (enforced)
+
+Every change moves through this pipeline, in order. Don't skip stages.
+
+1. **Spec** — write/extend the contract first (`docs/design.md` + the companion
+   specs below). No behaviour is "designed in code."
+2. **Plan** — break the spec into the smallest reviewable cut; state the cut's
+   exit criterion (`docs/design.md §6`).
+3. **TDD** — failing test → code → green. Mandatory (see Testing & TDD).
+4. **Adversarial review** — argue against the change. Run it past the standing
+   punch-list in `docs/architecture-review.md`; add new questions you couldn't
+   answer. Push for a faster/cleaner/safer method before defending v1.
+
+Two gates apply at **every** stage, not just at the end:
+- **Security** (`docs/security.md`): no superuser/extension assumptions; secrets
+  only in `.pgpass`; `sslmode=verify-full` + `channel_binding=require`; least
+  privilege; never log row data; RLS silently filters `COPY TO` — detect & warn.
+- **Speed** (`docs/performance.md`): know the bottleneck before optimising;
+  binary COPY + CTID-split parallelism + load-then-index; emit per-phase
+  throughput; meet the benchmark targets.
+
+**Web-research for context is mandatory** when touching PG behaviour, a tool, or
+a perf/security claim — cite the source in `docs/research-notes.md` (don't answer
+from memory). Prefer version-pinned postgresql.org docs.
+
+This is a **multi-wave** build (`docs/design.md §6`): Wave 0 (registry/contract,
+done) → Wave 1 (single-table copy) → Wave 2 (multi-table + parallelism +
+cutover) → Wave 3 (phased agent CLI + verification + resume) → Wave 4 (fleet
+ergonomics). Don't pull work forward across waves.
+
+### Companion specs (read alongside the contract)
+
+- `docs/design.md` — the architectural contract + waved roadmap (read first).
+- `docs/performance.md` — ranked lightning levers + benchmark targets.
+- `docs/validation.md` — validation modes, failure paths, atomic stage-swap.
+- `docs/security.md` — security defaults, least-privilege grants, RLS landmine.
+- `docs/architecture-review.md` — the standing adversarial punch-list.
+- `docs/schemas/*.schema.json` — canonical data contracts (envelope, plan,
+  job-state). Keep code and these in lock-step.
+- `docs/research-notes.md` — the sourced evidence base; cite `§RN…` in decisions.
+
 ## What this project is
 
 A lightweight, **client-side** PostgreSQL table-copy CLI for a fleet of ~100

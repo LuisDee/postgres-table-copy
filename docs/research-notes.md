@@ -192,3 +192,88 @@ openstatus.dev/blog/building-cli-for-human-and-agents ·
 developer.hashicorp.com/terraform/cli/commands/apply ·
 github.com/dimitri/pgcopydb · pgloader.readthedocs.io · planet.postgresql.org ·
 lists.postgresql.org.
+
+---
+
+# Wave 2 research — performance, validation/failure, security/review
+
+## §RN2 Performance (make it lightning)
+
+Bottleneck order for cross-host: target write/WAL + index build > source read ≈
+network. Ranked levers (measured): **(1) multi-table + intra-table CTID-split
+parallelism ≈5–10×** — 1 TB: pg_dump|restore ~17 h vs CTID-partitioned ~1 h 49 m
+≈550 MB/s; optimal workers ≈ min(target cores, 8) (COPY scaling flattens past
+~8). **(2) load-then-build-indexes, parallel `CREATE INDEX` ≈80%** + session
+`maintenance_work_mem`/`max_parallel_maintenance_workers`. **(3) binary COPY
+STDOUT→STDIN, zero staging** (psycopg3 ≈1.2M rows/s). **(4) psycopg3 pipeline
+mode 2–5×** for the DDL storm. **(5) PG18 libpq `compression=zstd`/`lz4`** —
+client-settable, only when network-bound (TLS compression is dead). **(6)
+`SET synchronous_commit=off`** per session. Traps: UNLOGGED→`SET LOGGED`
+(double WAL + rewrite); `COPY FREEZE`/`max_wal_size`/`wal_level=minimal`
+(server-side/superuser); transaction-pooled PgBouncer breaks
+`SET TRANSACTION SNAPSHOT`.
+
+Sources: blog.peerdb.io/how-can-we-make-pgdump-and-pgrestore-5-times-faster ·
+clickhouse.com/blog/practical-postgres-migrations-at-scale-peerdb ·
+pgcopydb.readthedocs.io/en/latest/concurrency.html ·
+postgresql.org/docs/current/populate.html · …/sql-copy.html ·
+postgresql.org/docs/18/libpq-connect.html (compression) ·
+tigerdata.com/blog/psycopg2-vs-psycopg3-performance-benchmark ·
+psycopg.org/articles/2024/05/08/psycopg3-pipeline-mode/ ·
+cybertec-postgresql.com/en/postgresql-bulk-loading-huge-amounts-of-data/ ·
+wiki.postgresql.org/wiki/Improve_the_performance_of_ALTER_TABLE_SET_LOGGED_UNLOGGED_statement ·
+postgresqlco.nf/doc/en/param/synchronous_commit/ ·
+stormatics.tech/blogs/parallel-index-build-in-pgvector.
+
+## §RN3 Validation, failure paths, atomic swap
+
+Validation must read a **pinned snapshot** both sides or counts are meaningless.
+Modes (prefer order-independent so chunks fold without a global sort):
+`COUNT(*)` (weak) < per-column aggregates < per-row hash folded with
+`sum(hashtext(row::text)::bigint)` **+ `count(1)`** (pgcopydb's primitive;
+probabilistic) < `md5(string_agg(t::text ORDER BY pk))` (definitive, costly, not
+chunkable, unstable across versions). 32-bit `hashtext` alone collides ~77k rows;
+extension hashes need `CREATE EXTENSION` (unavailable). `bit_xor` is blind to
+even-count duplicates. pgcopydb `compare data` = `select count(1),
+md5(format('%s-%s', sum(hashtext(ROW::text)::bigint), count(1)))::uuid` per side
+— docs warn it's not a full comparison. AWS DMS does row-by-row PK-aligned
+validation (no PK → suspended). Failure facts: `COPY FROM` is all-or-nothing
+(zero rows on abort, but dead tuples remain → VACUUM); PG17 `ON_ERROR ignore`
+skips **cast** errors only (`REJECT_LIMIT` is **PG18**); source snapshot loss
+forces `--resume --not-consistent`. PG DDL is transactional: stage→`RENAME`
+swap is atomic & catalog-only (ms) but ACCESS EXCLUSIVE blocks SELECT and a
+pending one queues all readers → low `lock_timeout`+retry. TRUNCATE/rewrite are
+not MVCC-safe.
+
+Sources: postgresql.org/docs/current/sql-copy.html · …/transaction-iso.html ·
+…/functions-admin.html · …/sql-set-transaction.html · …/mvcc-caveats.html ·
+…/explicit-locking.html · …/sql-altertable.html · …/runtime-config-client.html
+(lock_timeout) · …/functions-aggregate.html (bit_xor, string_agg) ·
+pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_compare.html · …/resume.html ·
+docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html ·
+docs.percona.com/percona-toolkit/pt-table-checksum.html ·
+wiki.postgresql.org/wiki/Transactional_DDL_in_PostgreSQL ·
+about/featurematrix/detail/copy-on_error · pgloader.readthedocs.io/en/latest/batches.html.
+
+## §RN4 Security & architect review
+
+Defaults: `sslmode=verify-full` (libpq default `prefer` is insecure; `require`
+does no cert check) + pinned `sslrootcert` + `channel_binding=require` (SCRAM
+cert binding, PG13+). Secrets in `.pgpass` (0600 or libpq ignores it) / service
+file; never argv/SQL/logs; `PGPASSWORD` discouraged. Least privilege: COPY
+STDIN/STDOUT need **no superuser**, no `pg_read_server_files`; `COPY TO` needs
+SELECT, `COPY FROM` needs INSERT; `ALTER`/`RENAME`/`CREATE INDEX`/`DROP` need
+**ownership** (not grantable) — so the tool must **create & own** its target +
+staging tables. **RLS landmine: `COPY TO` silently filters** for non-owner
+non-BYPASSRLS roles (looks complete, isn't); `COPY FROM` unsupported under RLS →
+INSERT. Detect via `pg_class.relrowsecurity`; warn/fail. In-flight exposure:
+`RLIMIT_CORE=0`, avoid swap, never log rows, end-to-end TLS. Audit: pgAudit logs
+statements not payloads → emit an app-level manifest (snapshot id, LSN, checksum,
+row count). Architect punch-list lives in `docs/architecture-review.md`.
+
+Sources: postgresql.org/docs/current/libpq-ssl.html · …/libpq-connect.html ·
+…/libpq-pgpass.html · …/libpq-pgservice.html · …/libpq-envars.html ·
+…/sql-copy.html (privileges + RLS) · …/ddl-rowsecurity.html · …/sql-altertable.html ·
+…/sql-createindex.html · …/collation.html · …/sql-altercollation.html ·
+…/multibyte.html · …/runtime-config-logging.html · pgaudit.org ·
+wiki.sei.cmu.edu MEM06-C.

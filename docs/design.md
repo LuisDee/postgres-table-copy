@@ -1,10 +1,24 @@
 # Design: client-side, fleet-scale PostgreSQL table copy
 
-Status: **draft / proposed contract.** This is the document subsequent cuts
-execute against. Implementation lands in small, reviewable cuts (§6). Do not
-collapse multiple cuts into one PR. The research this design rests on, with
-sources, is in `docs/research-notes.md`; section references like `[RN §2]`
+Status: **draft / proposed contract.** This is the document subsequent stages
+execute against. Implementation lands in small, reviewable stages — waves →
+phases → stages (§6). Do not collapse stages. The research this design rests on,
+with sources, is in `docs/research-notes.md`; section references like `[RN §2]`
 point there.
+
+**Companion specs (this contract is split for clarity):**
+
+- `docs/performance.md` — bottleneck model, ranked lightning levers, benchmark
+  targets. *Speed gate.*
+- `docs/validation.md` — validation modes, failure-paths, atomic stage-swap.
+- `docs/security.md` — TLS/credential/least-privilege defaults, the RLS landmine.
+  *Security gate.*
+- `docs/architecture-review.md` — the standing adversarial punch-list.
+- `docs/schemas/*.schema.json` — canonical data contracts (envelope, plan,
+  job-state). Code and schemas move in lock-step.
+
+Delivery follows `spec → plan → TDD → adversarial review` with security & speed
+as standing gates (see `CLAUDE.md`).
 
 ---
 
@@ -377,32 +391,72 @@ src/postgres_table_copy/
 
 ---
 
-## 6. Cuts roadmap
+## 6. Roadmap — waves → phases → stages
 
-Each cut is one PR, lands green tests, never breaks earlier cuts.
+This is a multi-stage build, not a single drop. **Waves** are themes;
+**phases** are coherent capabilities within a wave; **stages** are the
+one-commit cuts that each land green tests via TDD and never break earlier
+stages. Don't pull work forward across waves. Each stage carries an explicit
+*exit criterion*.
 
-- **Cut 0 — skeleton + endpoint registry.** `Endpoint`, registry over
-  `pg_service`/`.pgpass`, `endpoints add/list/remove/test`, JSON envelope, exit
-  codes, `errors.py`. No data plane. *Exit:* `endpoints test` reports version +
-  create-table privilege against a real PG (integration), unit tests green.
-- **Cut 1 — `direct_copy` single-table, same job snapshot.** Introspect columns
-  (exclude generated), one source snapshot, `COPY TO STDOUT → FROM STDIN`
-  (binary w/ text fallback), explicit columns, sequence reset, row-count verify,
-  per-table state. Cross-host and same-server. *Exit:* end-to-end copy of one
-  table cross-host in integration; SQL-string unit tests.
-- **Cut 2 — multi-table + FK ordering + intra-table parallelism.** `pg_constraint`
-  topo sort; drop/`NOT VALID`/`VALIDATE`; `ctid_chunked` + `key_range_chunked`;
-  client connection pool + budget; deferred parallel index build; stage-then-swap.
-  *Exit:* consistent multi-table copy with FKs re-validated; 100M-row table shows
-  speedup with `--max-parallel 4` (integration).
-- **Cut 3 — phased agent CLI + resume + verification suite.** `plan`/`run
-  --background`/`status --watch`/`wait`/`cancel`/`cleanup`; durable job file;
-  `--resume`; `hash`/`sample` verify; `pgcopydb_delegate` for whole-schema.
-  *Exit:* `plan → run --background → status --watch → verify` end-to-end; job
-  survives killing the CLI mid-run.
-- **Cut 4 — ergonomics.** `copy` one-shot; `logs --follow`; operator-pretune
-  detection (warn when `maintenance_work_mem`/`max_wal_size` could help);
-  same-server `INSERT … SELECT` fast path.
+### Wave 0 — contract & registry ✅ done (`8359d36`)
+The day-0 contracts everything builds on; no table data touched.
+- **Stage 0.1 — errors & envelope.** `errors.py` (exit codes, `ErrorCategory`,
+  exception hierarchy, SQLSTATE→category, `tolerate(*sqlstates)`); JSON envelope.
+- **Stage 0.2 — endpoint registry & CLI.** `Endpoint` (topology only; secrets in
+  `.pgpass`), `EndpointRegistry` (0600 YAML), `endpoints add/list/remove/test`,
+  phased-command stubs. *Exit (met):* 60 unit tests + ruff green; `endpoints
+  test` probes a real PG (integration, skips cleanly).
+
+### Wave 1 — single-table copy, correct & consistent
+The vertical slice that proves the data plane end-to-end.
+- **Phase 1A — introspection.** columns (exclude `GENERATED … STORED`),
+  identity/sequence discovery (`pg_get_serial_sequence`/`pg_depend`), table
+  profile (size via `relpages`, LOB/RLS/partition flags), pre-flight checks
+  (encoding/collation drift → warn; RLS → warn). *Exit:* SQL-string unit tests.
+- **Phase 1B — snapshot + `direct_copy`.** one `pg_export_snapshot()`; binary
+  `COPY TO STDOUT → FROM STDIN` (text fallback on major mismatch) streaming
+  opaque buffers; explicit column lists; `OVERRIDING SYSTEM VALUE`; post-load
+  `setval` sequence reset. *Exit:* end-to-end single-table copy cross-host **and**
+  same-server in integration.
+- **Phase 1C — `rows`+`columns` validation + per-table state.** both sides at the
+  pinned snapshot; mismatch → table FAILED. *Exit:* mismatch is detected and
+  reported; benchmark target (single medium table) recorded.
+
+### Wave 2 — many tables, fast, with safe cutover
+- **Phase 2A — dependency ordering.** `pg_constraint` topo sort; FK strategy
+  (drop+recreate, or `NOT VALID`+`VALIDATE`, or DEFERRABLE for cycles).
+- **Phase 2B — intra-table parallelism.** `ctid_chunked` + `key_range_chunked`;
+  client connection pool sized to budget (≈min(cores,8)); all chunk readers
+  share the snapshot. *Exit:* ≥100M-row table ≥3× single-stream with
+  `--max-parallel 4`.
+- **Phase 2C — load-then-index + atomic cutover.** deferred **parallel**
+  `CREATE INDEX` (`maintenance_work_mem`, `max_parallel_maintenance_workers`);
+  `synchronous_commit=off`; **stage→RENAME swap** with `lock_timeout`+retry,
+  old table dropped separately. *Exit:* swap window milliseconds under a
+  concurrent reader; FKs re-validated.
+
+### Wave 3 — phased agent CLI, verification, resume
+- **Phase 3A — `plan`** → emits the canonical `plan.schema.json` (strategy per
+  table, budget, projected peak connections, warnings) without touching data.
+- **Phase 3B — durable job state + `run`/`status`/`wait`/`cancel`/`cleanup`.**
+  `job-state.schema.json` under `~/.pgcopy/jobs/`; `--background`; orphan-staging
+  sweep. *Exit:* `plan → run --background → status --watch → verify` end-to-end;
+  job survives killing the CLI.
+- **Phase 3C — strong verification + resume + delegate.** `hash`/`digest`/
+  `sample` modes (canonical formula, per-chunk localisation), queryable reject
+  store; idempotent `--resume` (re-snapshots, `--not-consistent`);
+  `pgcopydb_delegate` for whole-schema clones.
+
+### Wave 4 — fleet ergonomics & scale
+- **Phase 4A — `copy` one-shot + `logs --follow`.**
+- **Phase 4B — fleet controls.** per-DB connection budgets, global rate limit,
+  blast-radius caps, operator-pretune detection, same-server `INSERT … SELECT`
+  fast path, blue/green target swap.
+
+> Performance, validation, security and the adversarial review gate **every**
+> stage — see `docs/performance.md`, `docs/validation.md`, `docs/security.md`,
+> `docs/architecture-review.md`.
 
 ---
 

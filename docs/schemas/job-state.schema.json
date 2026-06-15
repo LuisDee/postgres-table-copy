@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/LuisDee/postgres-table-copy/docs/schemas/job-state.schema.json",
+  "title": "pgcopy durable job state",
+  "description": "The durable, resumable record of a running/finished job. Default location ~/.pgcopy/jobs/<job_id>.json (client-side; docs/design.md §3.6). Lands in Wave 3. This is the canonical job-state contract — `pgcopy status/verify/cancel/cleanup/wait` read it; `--resume` rebuilds from it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "created_at", "status", "source", "target", "tables"],
+  "properties": {
+    "job_id": { "type": "string", "pattern": "^j_[0-9]{8}_[0-9]{6}_[0-9a-z]{4}$" },
+    "schema_version": { "type": "integer", "const": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "status": { "enum": ["PLANNED", "RUNNING", "DONE", "FAILED", "CANCELLED"] },
+    "source": { "$ref": "plan.schema.json#/$defs/endpointRef" },
+    "target": { "$ref": "plan.schema.json#/$defs/endpointRef" },
+    "read_point": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The pinned source read point, recorded for after-the-fact reproducibility (validation.md §1).",
+      "properties": {
+        "snapshot_id": { "type": "string", "description": "pg_export_snapshot() id, e.g. 00000003-0000001B-1." },
+        "current_snapshot": { "type": "string", "description": "pg_current_snapshot() xmin:xmax:xip." },
+        "wal_lsn": { "type": "string", "description": "pg_current_wal_lsn() at read time." }
+      }
+    },
+    "error": { "$ref": "#/$defs/errorRecord" },
+    "tables": { "type": "array", "items": { "$ref": "#/$defs/tableState" } }
+  },
+  "$defs": {
+    "tableState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "name", "status"],
+      "properties": {
+        "schema": { "type": "string" },
+        "name": { "type": "string" },
+        "strategy": { "enum": ["direct_copy", "ctid_chunked", "key_range_chunked", "pgcopydb_delegate"] },
+        "status": { "enum": ["PENDING", "COPYING", "INDEXING", "VALIDATING", "SWAPPED", "DONE", "FAILED"] },
+        "staging_name": { "type": "string", "description": "Deterministic staging table name: pgcopy_stg__<job>__<table>." },
+        "rows_source": { "type": ["integer", "null"], "minimum": 0 },
+        "rows_target": { "type": ["integer", "null"], "minimum": 0 },
+        "checksum_source": { "type": ["string", "null"] },
+        "checksum_target": { "type": ["string", "null"] },
+        "validation": { "enum": ["rows", "columns", "hash", "digest", "sample", "none"] },
+        "match": { "type": ["boolean", "null"], "description": "null until validated." },
+        "started_at": { "type": ["string", "null"], "format": "date-time" },
+        "ended_at": { "type": ["string", "null"], "format": "date-time" },
+        "chunks": { "type": "array", "items": { "$ref": "#/$defs/chunkState" } },
+        "error": { "$ref": "#/$defs/errorRecord" }
+      }
+    },
+    "chunkState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "status"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "predicate": { "type": "string", "description": "The WHERE clause for this chunk, e.g. ctid range or key range." },
+        "status": { "enum": ["PENDING", "COPYING", "DONE", "FAILED"] },
+        "rows": { "type": ["integer", "null"], "minimum": 0 },
+        "checksum": { "type": ["string", "null"] }
+      }
+    },
+    "errorRecord": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "sqlstate": { "type": ["string", "null"] },
+        "category": { "enum": ["CONFIG", "AUTH", "TRANSIENT", "DATA", "INTERNAL"] },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

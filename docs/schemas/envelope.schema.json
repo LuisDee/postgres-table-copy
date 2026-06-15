@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/LuisDee/postgres-table-copy/docs/schemas/envelope.schema.json",
+  "title": "pgcopy JSON envelope",
+  "description": "The single response shape every pgcopy command emits with --json. Stable from day 0 (Cut 0). See docs/design.md §4.1 and src/postgres_table_copy/cli.py:build_envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok", "command", "job_id", "data", "error", "error_category"],
+  "properties": {
+    "ok": {
+      "type": "boolean",
+      "description": "True iff the command succeeded."
+    },
+    "command": {
+      "type": "string",
+      "description": "The command that produced this envelope, e.g. 'endpoints add', 'plan'."
+    },
+    "job_id": {
+      "type": ["string", "null"],
+      "description": "Job identifier (j_<YYYYMMDD>_<HHMMSS>_<rand4>) for commands that operate on a job; null otherwise.",
+      "pattern": "^j_[0-9]{8}_[0-9]{6}_[0-9a-z]{4}$"
+    },
+    "data": {
+      "type": "object",
+      "description": "Command-specific payload. {} on pure-error responses."
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Human-readable error message; null on success."
+    },
+    "error_category": {
+      "type": ["string", "null"],
+      "enum": ["CONFIG", "AUTH", "TRANSIENT", "DATA", "INTERNAL", null],
+      "description": "Category driving the exit code: CONFIG/AUTH->1, TRANSIENT->2, DATA->3, INTERNAL->4. null on success."
+    }
+  }
+}
