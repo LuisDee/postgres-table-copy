@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "postgres-table-copy"
+version = "0.0.0"
+description = "Client-side, agent-driven CLI to copy PostgreSQL tables across a fleet — nothing installed on the database servers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Luis de Burnay Bastos" }]
+keywords = ["postgresql", "copy", "etl", "fleet", "cli", "pgcopydb"]
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "click>=8.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+pgcopy = "postgres_table_copy.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/postgres_table_copy"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration'"
+pythonpath = ["src"]
+markers = [
+    "integration: requires a real PostgreSQL (testcontainers postgres:16 or $PGCOPY_TEST_DSN)",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+target-version = "py311"

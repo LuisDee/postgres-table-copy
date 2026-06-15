@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Project runtime state (durable job files / local registry live in $HOME, but
+# never commit any that land here)
+.pgcopy/
+*.log
+
+# Secrets — never commit credentials
+.pgpass
+.pg_service.conf
+.env
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
