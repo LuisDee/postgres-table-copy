@@ -277,3 +277,61 @@ Sources: postgresql.org/docs/current/libpq-ssl.html · …/libpq-connect.html ·
 …/sql-createindex.html · …/collation.html · …/sql-altercollation.html ·
 …/multibyte.html · …/runtime-config-logging.html · pgaudit.org ·
 wiki.sei.cmu.edu MEM06-C.
+
+---
+
+# Design-review wave — reproduced evidence (RN-Δ)
+
+## §RN-Δ Build-vs-buy boundary, single-stream speed, and the RLS landmine
+
+Gathered by running real commands against a throwaway local PG 16.13 cluster with
+pgcopydb 0.15 and psycopg 3.3.4 (all torn down after). These are primary,
+reproduced results — they outrank memory and, for the RLS guard, a doc quote.
+
+**pgcopydb capability surface (primary: the installed `--help`).** `pgcopydb
+clone --help` exposes `--table-jobs`, `--index-jobs`, `--split-tables-larger-than`
+(same-table concurrency threshold), `--filters`, `--resume`, `--not-consistent`,
+`--snapshot`. There is **no** `rename`/`remap`/`target-schema` flag in `clone`,
+`copy`, or `copy table-data` — pgcopydb clones objects under identical names.
+⇒ pgcopydb covers consistent/parallel/split/resumable bulk movement of
+*same-named* objects; it cannot remap into a different or populated target. That
+is the bespoke boundary (design §3.4, §7).
+
+**Intra-table split, observed.** `pgcopydb copy table-data --table-jobs 4
+--split-tables-larger-than 50MB` on a 178 MB table logged: *"Table public.bench is
+178 MB large, 4 COPY processes will be used, partitioning on id."* ⇒ pgcopydb
+already does `key_range_chunked` by default; reimplementing it for the same-name
+case would duplicate the tool (design §6 Wave 2 re-scoped to remap-only).
+
+**Single-stream client passthrough speed.** psycopg3 binary `COPY bench TO STDOUT
+(FORMAT binary)` → `COPY bench FROM STDIN (FORMAT binary)`, streaming raw blocks
+(no row materialisation), 2,000,000 rows / 172 MB on a unix socket, heap-only
+target: **4.61 s ≈ 37 MB/s ≈ 0.43 Mrows/s**. The same data via pgcopydb (above):
+**2.65 s ≈ 1.7×** faster locally; the gap widens over a network (single-stream
+crosses the client twice on one TCP connection). ⇒ Wave-1 `direct_copy` is a
+correctness vehicle, not the speed story (performance.md).
+
+**pgcopydb `compare` is not a full check (external).** `pgcopydb compare data`
+computes a per-table row count + checksum (`md5` over `sum(hashtext(row::text)
+::bigint)` folded with `count(1)`) on each side and compares the checksums; the
+docs state this is **"not a full comparison of the data set, as cases where the
+checksums are the same and the data differ can be found."** ⇒ justifies our
+independent verification layer (design §3.10).
+Sources: pgcopydb.readthedocs.io/en/latest/ref/pgcopydb_compare.html ·
+manpages.debian.org/unstable/pgcopydb/pgcopydb%20compare.1 ·
+github.com/dimitri/pgcopydb.
+
+**RLS silent under-copy + the fail-loud guard (reproduced).** Table of 100 rows,
+RLS policy `USING (tenant='a')` (matches 50), granted `SELECT` to a non-owner
+`reader` role:
+- `reader` `\copy (SELECT * FROM t) TO STDOUT` → **50 rows, no error** (silent).
+- `reader` `SELECT count(*) FROM t` → **50** (so a same-role count-vs-count check
+  sees no gap and passes a partial copy).
+- `reader` `SET row_security = off; SELECT count(*) FROM t;` →
+  **`ERROR: query would be affected by row-level security policy for table "t"`**.
+⇒ the mitigation must be `SET row_security = off` on every source read (fail loud),
+with an owner/`BYPASSRLS` copy role — not "hard-fail a row-count gap," which
+cannot fire (security.md, validation.md §1, arch-review #7).
+Source (corroborating): postgresql.org/docs/16/sql-copy.html (COPY honours RLS;
+`row_security=off` errors rather than silently omitting rows — same guard
+`pg_dump` relies on).

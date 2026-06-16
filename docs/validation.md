@@ -16,6 +16,13 @@ that is not corruption.
   the whole job; every reader/validator runs `SET TRANSACTION SNAPSHOT '<id>'`
   as its first statement. (Our "one snapshot per job"; how `pg_dump -j` stays
   consistent.)
+- **Every source read/validate txn also sets `SET row_security = off`** (and pins
+  `client_encoding`, `DateStyle = ISO`). This is a correctness primitive, not
+  just security: under RLS a filtering role undercounts *both* the COPY and the
+  `COUNT(*)` identically, so a count-vs-count check passes a partial copy.
+  `row_security = off` makes a would-be-filtered read **error** instead of lying
+  (reproduced; see `security.md` → RLS). The copy/validate role must be owner or
+  `BYPASSRLS` for RLS tables.
 - **Record the read point** for after-the-fact disputes: exported-snapshot id +
   `pg_current_snapshot()` (`xmin:xmax:xip`) + `pg_current_wal_lsn()`. PostgreSQL
   has **no flashback** — "validate later" means anchoring to a live snapshot
@@ -94,7 +101,10 @@ DROP TABLE live_old;               -- separate txn: shorten the lock hold
 EXCLUSIVE, which blocks even `SELECT`; PG's FIFO fairness means a *pending*
 ACCESS EXCLUSIVE stuck behind one long reader makes **all** subsequent SELECTs
 queue behind it. Mitigate with low `lock_timeout` + retry, or
-`LOCK TABLE … NOWAIT` (`55P03`) at the top of the swap.
+`LOCK TABLE … NOWAIT` (`55P03`) at the top of the swap. **The retry only works if
+`55P03` is categorised `TRANSIENT`** — `lock_timeout`/`NOWAIT` both raise class
+`55`, which must map to a retryable category, not `INTERNAL` (see `design.md
+§4.2` / `errors.py`).
 
 **Why RENAME beats TRUNCATE+reload:** TRUNCATE+reload in one txn holds ACCESS
 EXCLUSIVE for the *entire load* — readers block the whole time. The RENAME swap

@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/LuisDee/postgres-table-copy/docs/schemas/job-state.schema.json",
+  "$id": "https://github.com/luisdee/postgres-table-copy/docs/schemas/job-state.schema.json",
   "title": "pgcopy durable job state",
   "description": "The durable, resumable record of a running/finished job. Default location ~/.pgcopy/jobs/<job_id>.json (client-side; docs/design.md §3.6). Lands in Wave 3. This is the canonical job-state contract — `pgcopy status/verify/cancel/cleanup/wait` read it; `--resume` rebuilds from it.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["job_id", "created_at", "status", "source", "target", "tables"],
+  "required": ["schema_version", "job_id", "created_at", "status", "source", "target", "tables"],
   "properties": {
     "job_id": { "type": "string", "pattern": "^j_[0-9]{8}_[0-9]{6}_[0-9a-z]{4}$" },
     "schema_version": { "type": "integer", "const": 1 },
@@ -21,7 +21,9 @@
       "properties": {
         "snapshot_id": { "type": "string", "description": "pg_export_snapshot() id, e.g. 00000003-0000001B-1." },
         "current_snapshot": { "type": "string", "description": "pg_current_snapshot() xmin:xmax:xip." },
-        "wal_lsn": { "type": "string", "description": "pg_current_wal_lsn() at read time." }
+        "wal_lsn": { "type": "string", "description": "pg_current_wal_lsn() at read time." },
+        "row_security_off": { "type": "boolean", "description": "True iff source reads ran with SET row_security = off (fail-loud RLS guard; security.md). Proves the copy was not RLS-truncated." },
+        "copy_role": { "type": "string", "description": "Effective role used for the source read (must be owner/BYPASSRLS for RLS tables)." }
       }
     },
     "error": { "$ref": "#/$defs/errorRecord" },

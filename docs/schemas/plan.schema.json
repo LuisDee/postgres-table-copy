@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/LuisDee/postgres-table-copy/docs/schemas/plan.schema.json",
+  "$id": "https://github.com/luisdee/postgres-table-copy/docs/schemas/plan.schema.json",
   "title": "pgcopy plan",
   "description": "Output of `pgcopy plan` — a reviewable, executable description of a copy job produced WITHOUT touching table data. `pgcopy run --plan FILE` consumes it. Lands in Wave 3 (docs/design.md §6). This is the canonical plan contract.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["job_id", "created_at", "source", "target", "consistency", "budget", "tables"],
+  "required": ["schema_version", "job_id", "created_at", "source", "target", "consistency", "budget", "tables"],
   "properties": {
     "job_id": { "type": "string", "pattern": "^j_[0-9]{8}_[0-9]{6}_[0-9a-z]{4}$" },
     "created_at": { "type": "string", "format": "date-time" },

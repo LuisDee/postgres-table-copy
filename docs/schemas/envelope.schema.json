@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/LuisDee/postgres-table-copy/docs/schemas/envelope.schema.json",
+  "$id": "https://github.com/luisdee/postgres-table-copy/docs/schemas/envelope.schema.json",
   "title": "pgcopy JSON envelope",
   "description": "The single response shape every pgcopy command emits with --json. Stable from day 0 (Cut 0). See docs/design.md §4.1 and src/postgres_table_copy/cli.py:build_envelope.",
   "type": "object",

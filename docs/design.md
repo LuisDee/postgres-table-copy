@@ -165,10 +165,21 @@ class Strategy(Protocol):
 
 | Strategy | When picked | Cut |
 |---|---|---|
-| `direct_copy` | small tables; single `COPY` stream | 1 |
-| `ctid_chunked` | large tables, no unique int key; split by CTID block range | 2 |
-| `key_range_chunked` | large tables with a unique int key; `WHERE id BETWEEN …` | 2 |
-| `pgcopydb_delegate` | whole-schema / very large clones; shell out to pgcopydb | 3 |
+| `pgcopydb_delegate` | **default** for same-name jobs (src schema == tgt schema, no per-table remap): whole-schema, large, or multi-table clones; shell out to pgcopydb | 1 |
+| `direct_copy` | the **remap path** — selective table(s) copied into a *different* or *populated* target schema/name; single `COPY` stream | 1 |
+| `ctid_chunked` | remap path, large table, no unique int key; split by CTID block range | 2 |
+| `key_range_chunked` | remap path, large table with a unique int key; `WHERE id BETWEEN …` | 2 |
+
+**Routing (the build-vs-buy boundary made operational, §7):** pgcopydb already
+does consistent, parallel, resumable, CTID/integer-split bulk movement of
+*same-named* objects (verified: it auto-splits a >threshold table on its integer
+key under `--split-tables-larger-than`). It has **no rename/remap** — it clones
+objects under identical names. So the picker delegates same-name work to
+pgcopydb from Wave 1, and the bespoke `COPY` engine owns only what pgcopydb
+structurally cannot: **table-with-remap into an existing/populated target**,
+plus independent verification (§3.10) and fleet/agent orchestration. The
+intra-table chunking strategies (Wave 2) exist **solely to parallelise the remap
+path** — they are not a general-purpose splitter competing with pgcopydb.
 
 `[RN §6]` Chunking splits a table across N connections. CTID ranges
 (`WHERE ctid >= '(lo,0)'::tid AND ctid < '(hi,0)'::tid`, half-open, open-ended
@@ -360,7 +371,13 @@ pgcopy copy   --from SRC --to DST --tables …      # plan→run→wait→verify
 
 `error_category` ∈ `CONFIG | AUTH | TRANSIENT | DATA | INTERNAL`. The
 `error_category` is derived from the failing SQLSTATE class where applicable
-(e.g. `23xxx`→`DATA`, `28xxx`/`42501`→`AUTH`, `08xxx`/`57xxx`→`TRANSIENT`).
+(e.g. `23xxx`→`DATA`, `28xxx`/`42501`→`AUTH`,
+`08xxx`/`40xxx`/`53xxx`/`55xxx`/`57xxx`→`TRANSIENT`). **Class `55` is
+load-bearing, not optional:** `lock_timeout` aborts the stage-swap with
+`55P03 lock_not_available`, and the cutover (`validation.md §4`) *depends on*
+that being retryable — so `55xx`→`TRANSIENT` (exit 2), never `INTERNAL`.
+(Code: `src/postgres_table_copy/errors.py` `_CLASS_CATEGORY` must include `"55"`;
+add a unit test asserting `55P03 → TRANSIENT → exit 2` when that code lands.)
 
 ### 4.2 Exit codes
 
@@ -409,7 +426,11 @@ The day-0 contracts everything builds on; no table data touched.
   test` probes a real PG (integration, skips cleanly).
 
 ### Wave 1 — single-table copy, correct & consistent
-The vertical slice that proves the data plane end-to-end.
+The vertical slice that proves the bespoke remap data plane end-to-end, **plus
+delegation to pgcopydb for the same-name case** so we never ship a copy path
+slower than the off-the-shelf tool (§7; build-vs-buy boundary). The bespoke
+single-stream `direct_copy` is a *correctness* vehicle for remap, not the speed
+story — speed comes from delegation (same-name) and Wave 2 chunking (remap).
 - **Phase 1A — introspection.** columns (exclude `GENERATED … STORED`),
   identity/sequence discovery (`pg_get_serial_sequence`/`pg_depend`), table
   profile (size via `relpages`, LOB/RLS/partition flags), pre-flight checks
@@ -422,14 +443,25 @@ The vertical slice that proves the data plane end-to-end.
 - **Phase 1C — `rows`+`columns` validation + per-table state.** both sides at the
   pinned snapshot; mismatch → table FAILED. *Exit:* mismatch is detected and
   reported; benchmark target (single medium table) recorded.
+- **Phase 1D — `pgcopydb_delegate` for same-name jobs.** picker routes
+  src-schema==tgt-schema / whole-schema / large clones to a shell-out wrapper
+  over `pgcopydb clone|copy` (consistent, parallel, resumable, CTID/integer
+  split — all already provided). Our verification layer (§3.10) runs on top
+  regardless, since pgcopydb's own `compare` is checksum-only and "not a full
+  comparison." *Exit:* a same-name whole-schema clone completes via pgcopydb and
+  passes our independent verify; remap jobs still take the bespoke path.
 
-### Wave 2 — many tables, fast, with safe cutover
+### Wave 2 — parallelise the remap path, with safe cutover
+Scope: speed for the **remap/selective** copies pgcopydb cannot serve (same-name
+work is already parallel via the Wave 1 delegate). Don't build a general-purpose
+splitter that competes with pgcopydb.
 - **Phase 2A — dependency ordering.** `pg_constraint` topo sort; FK strategy
   (drop+recreate, or `NOT VALID`+`VALIDATE`, or DEFERRABLE for cycles).
-- **Phase 2B — intra-table parallelism.** `ctid_chunked` + `key_range_chunked`;
-  client connection pool sized to budget (≈min(cores,8)); all chunk readers
-  share the snapshot. *Exit:* ≥100M-row table ≥3× single-stream with
-  `--max-parallel 4`.
+- **Phase 2B — intra-table parallelism (remap path only).** `ctid_chunked` +
+  `key_range_chunked` for large *remap* tables; client connection pool sized to
+  budget (≈min(cores,8)); all chunk readers share the snapshot. (Same-name
+  tables get their splitting from the Wave 1 pgcopydb delegate.) *Exit:*
+  ≥100M-row remap table ≥3× single-stream with `--max-parallel 4`.
 - **Phase 2C — load-then-index + atomic cutover.** deferred **parallel**
   `CREATE INDEX` (`maintenance_work_mem`, `max_parallel_maintenance_workers`);
   `synchronous_commit=off`; **stage→RENAME swap** with `lock_timeout`+retry,
@@ -443,10 +475,11 @@ The vertical slice that proves the data plane end-to-end.
   `job-state.schema.json` under `~/.pgcopy/jobs/`; `--background`; orphan-staging
   sweep. *Exit:* `plan → run --background → status --watch → verify` end-to-end;
   job survives killing the CLI.
-- **Phase 3C — strong verification + resume + delegate.** `hash`/`digest`/
-  `sample` modes (canonical formula, per-chunk localisation), queryable reject
-  store; idempotent `--resume` (re-snapshots, `--not-consistent`);
-  `pgcopydb_delegate` for whole-schema clones.
+- **Phase 3C — strong verification + resume.** `hash`/`digest`/`sample` modes
+  (canonical formula, per-chunk localisation), queryable reject store; idempotent
+  `--resume` (re-snapshots, `--not-consistent`). (`pgcopydb_delegate` itself
+  landed in Wave 1 Phase 1D; here it gains `--resume` pass-through and its
+  results flow through the same verification/job-state surface.)
 
 ### Wave 4 — fleet ergonomics & scale
 - **Phase 4A — `copy` one-shot + `logs --follow`.**
@@ -470,11 +503,23 @@ whole-database-clone-shaped; our job is "copy *these* tables between *these*
 schemas/hosts across a fleet of 100" — orchestration it doesn't own.
 
 Decision: a **thin fleet/agent orchestrator** that (a) delegates to pgcopydb for
-bulk/whole-schema clones (`pgcopydb_delegate`), and (b) uses direct libpq `COPY`
-for selective table/schema copies and same-server schema→schema. We add the
-**independent verification layer pgcopydb lacks** (§3.10) as the differentiator.
-We ship `pgcopydb` + matching `pg_dump`/`pg_restore` client binaries on our
-side; the no-install rule is about the database *hosts*.
+bulk/whole-schema **same-name** clones (`pgcopydb_delegate`) **from Wave 1** — so
+no shipped release is slower than the tool that already does consistent, parallel,
+resumable, split COPY — and (b) uses direct libpq `COPY` for the case pgcopydb
+**structurally cannot** serve: selective table(s) **remapped** into a different
+or already-populated target schema/name (pgcopydb has no rename/remap and is
+whole-database-clone-shaped). We add the **independent verification layer
+pgcopydb lacks** (§3.10) as the differentiator — it runs on top of *both* paths,
+because pgcopydb's own `compare` is checksum-only and documented as "not a full
+comparison." We ship `pgcopydb` + matching `pg_dump`/`pg_restore` client
+binaries on our side; the no-install rule is about the database *hosts*.
+
+Evidence (reproduced, pgcopydb 0.15 / PG 16.13): `pgcopydb clone --help` exposes
+`--table-jobs --index-jobs --split-tables-larger-than --filters --resume
+--snapshot` but **no remap/target-schema flag**; a >threshold table was
+auto-split into 4 COPY processes partitioning on its integer key; a same-data
+copy ran ~1.7× a single-stream client passthrough on a local socket (the gap
+widens over a real network). See `docs/research-notes.md §RN-Δ`.
 
 ---
 

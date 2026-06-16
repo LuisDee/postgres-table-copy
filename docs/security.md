@@ -64,10 +64,27 @@ Rows live briefly in process memory while streaming. Mitigations:
 - **`COPY FROM` is unsupported on RLS tables** — must use INSERT.
 - Owners bypass RLS unless `FORCE ROW LEVEL SECURITY`; superuser/`BYPASSRLS`
   always bypass.
-- **Required behaviour:** detect RLS via `pg_class.relrowsecurity` /
-  `relforcerowsecurity` at plan time and **warn loudly**; document which role
-  identity guarantees a full copy. Treat a silent row-count gap on an RLS table
-  as a hard failure, not a warning, when validation is on.
+- **Why a row-count gate is NOT enough (reproduced):** as a non-owner,
+  `SELECT`-only role on a table with a restrictive policy, `COPY … TO STDOUT`
+  returned **50 of 100 rows with no error** — *and* `SELECT count(*)` **under
+  that same role also returned 50**. So a validation that counts the source
+  under the copy role sees `50 == 50` and **passes a partial copy**. Detecting a
+  "row-count gap" cannot work when both sides are read through the same filter.
+- **Required behaviour — fail loud at the read, not at the count:** every source
+  read transaction runs **`SET row_security = off`** as part of its setup
+  (alongside the snapshot import and `client_encoding`/`DateStyle` pins). With
+  `row_security = off`, a query that *would* be filtered by a policy **errors**
+  instead of silently undercounting:
+  `ERROR: query would be affected by row-level security policy for table "…"`
+  (reproduced; this is PostgreSQL's documented backup-safety behaviour, the same
+  guard `pg_dump` relies on). The copy role must therefore be the table **owner**
+  or **`BYPASSRLS`** for any RLS table we promise to copy in full.
+- **Detect + record:** still detect RLS via `pg_class.relrowsecurity` /
+  `relforcerowsecurity` at plan time and emit an `RLS_FILTER` warning; if the
+  read raises under `row_security = off`, **fail the table** (do not downgrade to
+  a warning) unless the operator passes an explicit opt-in
+  (`--allow-rls-partial`). Record `row_security_off` (and the effective role) in
+  job-state and the manifest so a copy can be *proven* not RLS-truncated.
 
 ## Audit & compliance
 

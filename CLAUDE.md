@@ -80,8 +80,8 @@ It is a concept-port of `oracle-schema-refresh` — same phased-engine,
 agent-CLI, one-consistent-read-per-job, cut-based-delivery DNA — rebuilt for
 PostgreSQL's no-install reality.
 
-Status: **pre-implementation. Cut 0 not started.** Roadmap in `docs/design.md`
-§6.
+Status: **Wave 0 done (registry + CLI contract, green); Wave 1 next.** Roadmap in
+`docs/design.md` §6.
 
 ## The two non-negotiable truths (read before writing any data-plane code)
 
